@@ -14,9 +14,9 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FishData
   maxSpeed: 1
   maxForce: 0.03
-  neighborhoodRadius: 3
-  separationRadius: 1
-  separationAmount: 1
-  cohesionAmount: 1
-  alignmentAmount: 1
-  prefab: {fileID: 0}
+  neighborhoodRadius: 5.1
+  separationRadius: 4.17
+  separationAmount: 0.57
+  cohesionAmount: 0.57
+  alignmentAmount: 0.39
+  prefab: {fileID: 1138331384927246, guid: 9d1d0b91403a8814ab6853947579bad9, type: 3}
