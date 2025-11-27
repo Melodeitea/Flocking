@@ -1,152 +1,223 @@
 ﻿using System.Collections.Generic;
-using System.Linq;
 using UnityEngine;
-using UnityEngine.Purchasing;
 
+	/* <summary>
+	 Fish behavior implementing simple boids (alignment, cohesion, separation).
+	 Parameters are driven by a FishData ScriptableObject assigned at runtime via Initialize.
+	 </summary> */
+[RequireComponent(typeof(Collider2D))] // Collider2D helps ensure this GameObject can be detected by OverlapCircleAll.
 public class Fish : MonoBehaviour
 {
-    [Range(0, 10)]
-    public float maxSpeed = 1f;
+	// Data asset that controls behavior. Hidden in inspector because we assign it via Initialize.
+	[HideInInspector]
+	public FishData data;
 
-    [Range(.1f, .5f)]
-    public float maxForce = .03f;
+	// Runtime state
+	public Vector2 acceleration;
+	public Vector2 velocity;
 
-    [Range(1, 10)]
-    public float neighborhoodRadius = 3f;
+	/* <summary>
+	 Public initializer. Call this immediately after instantiating the fish prefab so it gets its FishData.
+	 Sets a random rotation and initial velocity.
+	 </summary> */
+	public void Initialize(FishData fishData)
+	{
+		data = fishData;
 
-    [Range(0.1f, 10f)]
-    public float separationRadius = 1f;
+		// Random orientation around Z.
+		float angle = Random.Range(0f, 2f * Mathf.PI);
+		transform.rotation = Quaternion.Euler(0f, 0f, angle);
 
-    [Range(0, 3)]
-    public float separationAmount = 1f;
+		// Start at a random fraction of max speed so not all fish behave identically at spawn.
+		float startSpeed = Random.Range(0.5f, 1f) * (data != null ? data.maxSpeed : 1f);
+		velocity = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * startSpeed;
+	}
 
-    [Range(0, 3)]
-    public float cohesionAmount = 1f;
+	private void Start()
+	{
+		/* If the fish was placed in the scene directly (not spawned) and Initialize wasn't called,
+		   set a safe default so the fish still behaves.*/
+		if (data == null)
+		{
+			if (Application.isPlaying)
+				Debug.LogWarning($"Fish '{name}' has no FishData assigned. Assign via FishTank or call Initialize(FishData).");
+			float angle = Random.Range(0f, 2f * Mathf.PI);
+			transform.rotation = Quaternion.Euler(0f, 0f, angle);
+			velocity = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+		}
+	}
 
-    [Range(0, 3)]
-    public float alignmentAmount = 1f;
+	private void Update()
+	{
+		// Without data we cannot calculate behavior.
+		if (data == null) return;
 
-    public Vector2 acceleration;
-    public Vector2 velocity;
+		// Find nearby colliders within neighborhood radius.
+		var colliders = Physics2D.OverlapCircleAll(transform.position, data.neighborhoodRadius);
 
-    private void Start()
-    {
-        float angle = Random.Range(0, 2 * Mathf.PI);
-        transform.rotation = Quaternion.Euler(new Vector3(0, 0, angle));
-        velocity = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
-    }
+		// Build a list of other Fish components found.
+		var boids = new List<Fish>(colliders.Length);
+		foreach (var c in colliders)
+		{
+			if (c == null) continue;
+			var f = c.GetComponent<Fish>();
+			if (f != null && f != this) boids.Add(f);
+		}
 
-    private void Update()
-    {
-        var boidColliders = Physics2D.OverlapCircleAll(transform.position, neighborhoodRadius);
-        var boids = boidColliders.Select(boidCollider => boidCollider.GetComponent<Fish>()).ToList();
-        boids.Remove(this);
+		// Compute steering forces and update motion.
+		ComputeAcceleration(boids);
+		UpdateVelocity();
+		UpdatePosition();
+		UpdateRotation();
+	}
 
-        ComputeAcceleration(boids);
-        UpdateVelocity();
-        UpdatePosition();
-        UpdateRotation();
-    }
+	/* <summary>
+	 Combine alignment, cohesion and separation using the weights from FishData.
+	 </summary> */
+	private void ComputeAcceleration(IEnumerable<Fish> boids)
+	{
+		var alignment = Alignment(boids);
+		var separation = Separation(boids);
+		var cohesion = Cohesion(boids);
 
-    private void ComputeAcceleration(IEnumerable<Fish> boids)
-    {
-        var alignment = Alignment(boids);
-        var separation = Separation(boids);
-        var cohesion = Cohesion(boids);
+		// Weighted sum of steering components.
+		acceleration = data.alignmentAmount * alignment + data.cohesionAmount * cohesion + data.separationAmount * separation;
+	}
 
-        acceleration = alignmentAmount * alignment + cohesionAmount * cohesion + separationAmount * separation;
-    }
+	/* <summary>
+	 Apply acceleration to velocity and clamp speed to maxSpeed.
+	The original code added acceleration directly (frame dependent). This preserves that behavior.
+	</summary> */
+	public void UpdateVelocity()
+	{
+		velocity += acceleration;
+		velocity = LimitMagnitude(velocity, data.maxSpeed);
+	}
 
-    public void UpdateVelocity()
-    {
-        velocity += acceleration;
-        velocity = LimitMagnitude(velocity, maxSpeed);
-    }
+	/* <summary>
+	 Move the transform in world space according to velocity.
+	 </summary> */
+	private void UpdatePosition()
+	{
+		transform.Translate(velocity * Time.deltaTime, Space.World);
+	}
 
-    private void UpdatePosition()
-    {
-        transform.Translate(velocity * Time.deltaTime, Space.World);
-    }
+	/* <summary>
+	Rotate the fish to face the direction of movement.
+	</summary> */
+	private void UpdateRotation()
+	{
+		if (velocity.sqrMagnitude > 0.0001f)
+		{
+			float angle = Mathf.Atan2(velocity.y, velocity.x) * Mathf.Rad2Deg;
+			transform.rotation = Quaternion.Euler(0f, 0f, angle);
+		}
+	}
 
-    private void UpdateRotation()
-    {
-        var angle = Mathf.Atan2(velocity.y, velocity.x) * Mathf.Rad2Deg;
-        transform.rotation = Quaternion.Euler(new Vector3(0, 0, angle));
-    }
+	/* <summary>
+	Alignment: steer toward average heading of neighbors.
+	Returns a steering vector (desired - current velocity) limited by maxForce.
+	</summary> */
+	private Vector2 Alignment(IEnumerable<Fish> boids)
+	{
+		Vector2 sum = Vector2.zero;
+		int count = 0;
+		foreach (var b in boids)
+		{
+			sum += b.velocity;
+			count++;
+		}
 
-    private Vector2 Alignment(IEnumerable<Fish> boids)
-    {
-        var velocity = Vector2.zero;
-        if (!boids.Any()) return velocity;
+		if (count == 0) return Vector2.zero;
 
-        foreach (var boid in boids)
-        {
-            velocity += boid.velocity;
-        }
+		sum /= count; // average velocity
+		return Steer(sum.normalized * data.maxSpeed);
+	}
 
-        velocity /= boids.Count();
-        var steer = Steer(velocity.normalized * maxSpeed);
-        return steer;
-    }
+	/* <summary>
+	Cohesion: steer toward the center of mass of neighbors.
+	</summary> */
+	private Vector2 Cohesion(IEnumerable<Fish> boids)
+	{
+		Vector2 sum = Vector2.zero;
+		int count = 0;
+		foreach (var b in boids)
+		{
+			sum += (Vector2)b.transform.position;
+			count++;
+		}
 
-    private Vector2 Cohesion(IEnumerable<Fish> boids)
-    {
-        if (!boids.Any()) return Vector2.zero;
+		if (count == 0) return Vector2.zero;
 
-        var sumPositions = Vector2.zero;
-        foreach (var boid in boids)
-        {
-            sumPositions += (Vector2)boid.transform.position;
-        }
+		Vector2 average = sum / count;
+		Vector2 direction = average - (Vector2)transform.position;
+		return Steer(direction.normalized * data.maxSpeed);
+	}
 
-        var average = sumPositions / boids.Count();
-        var direction = average - (Vector2)transform.position;
-        var steer = Steer(direction.normalized * maxSpeed);
-        return steer;
-    }
+	/* <summary>
+	 Separation: steer away from close neighbors within separationRadius.
+	 </summary> */
+	private Vector2 Separation(IEnumerable<Fish> boids)
+	{
+		Vector2 direction = Vector2.zero;
+		int count = 0;
+		foreach (var b in boids)
+		{
+			float dist = Vector2.Distance(transform.position, b.transform.position);
+			if (dist <= data.separationRadius && dist > 0f)
+			{
+				// Sum normalized vectors pointing away from neighbor.
+				Vector2 diff = (Vector2)transform.position - (Vector2)b.transform.position;
+				direction += diff.normalized;
+				count++;
+			}
+		}
 
-    private Vector2 Separation(IEnumerable<Fish> boids)
-    {
-        var direction = Vector2.zero;
-        boids = boids.Where(boid => Vector2.Distance(transform.position, boid.transform.position) <= separationRadius);
-        if (!boids.Any()) return direction;
+		if (count == 0) return Vector2.zero;
 
-        foreach (var boid in boids)
-        {
-            Vector2 difference = transform.position - boid.transform.position;
-            direction += difference.normalized;
-        }
+		direction /= count;
+		return Steer(direction.normalized * data.maxSpeed);
+	}
 
-        direction /= boids.Count();
-        var steer = Steer(direction.normalized * maxSpeed);
-        return steer;
-    }
+	/* <summary>
+	Compute steering vector to move toward desired velocity and limit by maxForce.
+	</summary> */
+	private Vector2 Steer(Vector2 desired)
+	{
+		Vector2 steer = desired - velocity;
+		steer = LimitMagnitude(steer, data.maxForce);
+		return steer;
+	}
 
-    private Vector2 Steer(Vector2 desired)
-    {
-        var steer = desired - velocity;
-        steer = LimitMagnitude(steer, maxForce);
-        return steer;
-    }
+	/* <summary>
+	 Limit a vector's magnitude to max.
+	 </summary> */
+	private Vector2 LimitMagnitude(Vector2 v, float max)
+	{
+		if (v.sqrMagnitude > max * max) return v.normalized * max;
+		return v;
+	}
 
-    private Vector2 LimitMagnitude(Vector2 baseVector, float maxMagnitude)
-    {
-        if (baseVector.sqrMagnitude > maxMagnitude * maxMagnitude)
-        {
-            baseVector = baseVector.normalized * maxMagnitude;
-        }
+	/*<summary>
+	Draw debug gizmos for neighborhood and separation radii.
+	If no data is assigned, draw default values to help debugging.
+	</summary> */
+	private void OnDrawGizmosSelected()
+	{
+		if (data == null)
+		{
+			Gizmos.color = Color.green;
+			Gizmos.DrawWireSphere(transform.position, 3f);
 
-        return baseVector;
-    }
+			Gizmos.color = new Color(1f, 0.5f, 0.5f); // approximate salmon color
+			Gizmos.DrawWireSphere(transform.position, 1f);
+			return;
+		}
 
-    private void OnDrawGizmosSelected()
-    {
-        // Neighborhood radius.
-        Gizmos.color = Color.green;
-        Gizmos.DrawWireSphere(transform.position, neighborhoodRadius);
+		Gizmos.color = Color.green;
+		Gizmos.DrawWireSphere(transform.position, data.neighborhoodRadius);
 
-        // Separation radius.
-        Gizmos.color = Color.salmon;
-        Gizmos.DrawWireSphere(transform.position, separationRadius);
-    }
+		Gizmos.color = new Color(1f, 0.5f, 0.5f);
+		Gizmos.DrawWireSphere(transform.position, data.separationRadius);
+	}
 }
